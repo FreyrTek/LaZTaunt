@@ -1,0 +1,8 @@
+## Interface: 100207 ## Interface for Dragonflight Patch 10.2.7 (Adjust if needed for current patch)
+## Title: LaZTaunt
+## Notes: Displays a list of recent taunts in the raid/group. Click to announce.
+## Author: YourNameHere (or LaZTaunt)
+## Version: 1.0
+## SavedVariables: LaZTauntDB ## This tells WoW to save our settings table
+
+LaZTaunt.lua
