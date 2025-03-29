@@ -1,300 +1,352 @@
--- ============================================================================
--- Addon Setup
--- ============================================================================
 local ADDON_NAME = "LaZTaunt"
-local LaZTaunt = CreateFrame("Frame", ADDON_NAME .. "Frame") -- Main addon frame
+local isInitialized = false
+local LaZTaunt = {} -- Define globally
+local tauntHistory = {} -- Define globally to ensure persistence
+local tauntRows = {} -- Define globally to ensure persistence
 
 -- Default settings
 local defaults = {
-    pos = { "CENTER", "CENTER", 0, 0 }, -- Default position
-    maxEntries = 15, -- Maximum number of taunts to show
-    frameWidth = 250,
-    frameHeight = 200,
-    rowHeight = 20,
-    iconSize = 18,
+    pos = { "CENTER", "UIParent", "CENTER", 0, 0 },
+    maxEntries = 15,
+    frameWidth = 620, -- Adjusted to fit 600px scroll frame + padding
+    frameHeight = 520, -- Keep height as before
+    rowHeight = 43, -- Defined here, not in saved DB
 }
 
--- Database for saved settings (position, etc.)
-LaZTauntDB = LaZTauntDB or defaults -- Load saved settings or use defaults
-
--- Local references for performance
-local _G = _G
-local pairs = pairs
-local ipairs = ipairs
-local tinsert = table.insert
-local tremove = table.remove
-local date = date
-local time = time
-local GetTime = GetTime
-local GetSpellInfo = GetSpellInfo
-local SendChatMessage = SendChatMessage
-local IsInRaid = IsInRaid
-local IsInGroup = IsInGroup
-local UnitIsPlayer = UnitIsPlayer
-local CreateFrame = CreateFrame
-local UIParent = UIParent
-
--- Data storage
-local tauntHistory = {} -- Stores { timestamp, spellId, casterName, spellIcon, spellName }
-local tauntRows = {} -- Stores the UI row frames
-
--- ============================================================================
--- Known Taunt Spell IDs (Expand this list!)
--- ============================================================================
--- This is NOT exhaustive. Add more IDs from Wowhead/other sources for different specs/expansions.
-local knownTauntSpellIDs = {
-    -- Warrior
-    [355] = true,   -- Taunt
-    -- Paladin
-    [32700] = true, -- Hand of Reckoning
-    -- Death Knight
-    [56222] = true, -- Dark Command
-    -- Demon Hunter
-    [185245] = true,-- Torment
-    -- Monk
-    [115546] = true,-- Provoke
-    -- Druid
-    [5209] = true,  -- Growl (Bear Form)
-    -- Hunter Pets (May need different handling if you only want player taunts)
-    [2649] = true,  -- Growl (Pet) - Example, might want to filter non-player source later
-    -- Warlock Pets
-    [119905] = true, -- Threatening Presence (Voidwalker) - Example
+-- Class colors for row backgrounds
+local CLASS_COLORS = {
+    ["WARRIOR"] = { r = 0.78, g = 0.61, b = 0.43 },
+    ["PALADIN"] = { r = 0.96, g = 0.55, b = 0.73 },
+    ["DEATHKNIGHT"] = { r = 0.77, g = 0.12, b = 0.23 },
+    ["DEMONHUNTER"] = { r = 0.64, g = 0.19, b = 0.79 },
+    ["MONK"] = { r = 0.00, g = 1.00, b = 0.59 },
+    ["DRUID"] = { r = 1.00, g = 0.49, b = 0.04 },
+    ["HUNTER"] = { r = 0.67, g = 0.83, b = 0.45 },
+    ["WARLOCK"] = { r = 0.53, g = 0.53, b = 0.93 },
 }
 
--- ============================================================================
--- Frame Creation and Management
--- ============================================================================
-local mainFrame = LaZTaunt
-mainFrame:SetSize(LaZTauntDB.frameWidth or defaults.frameWidth, LaZTauntDB.frameHeight or defaults.frameHeight)
-mainFrame:SetClampedToScreen(true)
-mainFrame:SetMovable(true)
-mainFrame:EnableMouse(true)
-mainFrame:RegisterForDrag("LeftButton")
-mainFrame:SetScript("OnDragStart", function(self)
-    self:StartMoving()
-end)
-mainFrame:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    -- Save position
-    local point, relativeTo, relativePoint, xOfs, yOfs = self:GetPoint()
-    LaZTauntDB.pos = { point, relativeTo:GetName(), relativePoint, xOfs, yOfs }
-    print(ADDON_NAME .. ": Position saved.")
-end)
-
--- Backdrop
-mainFrame:SetBackdrop({
-    bgFile = "Interface/DialogFrame/UI-DialogBox-Background",
-    edgeFile = "Interface/DialogFrame/UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 }
-})
-mainFrame:SetBackdropColor(0, 0, 0, 0.8)
-mainFrame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
-
--- Title Text
-local title = mainFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-title:SetPoint("TOP", mainFrame, "TOP", 0, -8)
-title:SetText(ADDON_NAME)
-
--- Scroll Frame Setup
-local scrollFrame = CreateFrame("ScrollFrame", ADDON_NAME .. "ScrollFrame", mainFrame, "UIPanelScrollFrameTemplate")
-scrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 8, -30)
-scrollFrame:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -28, 8) -- -28 accounts for scrollbar
-
--- Scroll Child Frame (holds the actual content rows)
-local scrollChild = CreateFrame("Frame", ADDON_NAME .. "ScrollChild", scrollFrame)
-scrollFrame:SetScrollChild(scrollChild)
-scrollChild:SetSize(scrollFrame:GetWidth(), 1) -- Width matches scroll frame, height starts small
-
--- Function to apply saved or default position
-function LaZTaunt:ApplyPosition()
-    local pos = LaZTauntDB.pos
-    if pos and type(pos) == "table" and #pos == 5 and _G[pos[2]] then
-        mainFrame:ClearAllPoints()
-        -- Ensure relativeTo is a valid frame name that exists
-        local relativeFrame = _G[pos[2]] or UIParent
-        mainFrame:SetPoint(pos[1], relativeFrame, pos[3], pos[4], pos[5])
-    else
-        -- Apply default position if saved data is invalid or missing
-        mainFrame:ClearAllPoints()
-        mainFrame:SetPoint(defaults.pos[1], defaults.pos[2], defaults.pos[3], defaults.pos[4], defaults.pos[5])
-        LaZTauntDB.pos = defaults.pos -- Save the default back if it was bad
-    end
+-- Early check (minimal impact)
+if not table.insert or not table.concat or not table.sort then
+    -- print(ADDON_NAME .. ": Critical error - Lua table functions missing! Please report to Blizzard (11.1 bug).")
+else
+    LaZTauntDB = LaZTauntDB or CopyTable(defaults)
 end
 
--- ============================================================================
--- Update Display Function
--- ============================================================================
-function LaZTaunt:UpdateDisplay()
-    local currentY = 0
-    local rowHeight = LaZTauntDB.rowHeight or defaults.rowHeight
-    local iconSize = LaZTauntDB.iconSize or defaults.iconSize
-    local frameWidth = (LaZTauntDB.frameWidth or defaults.frameWidth) - 10 -- Usable width inside scroll child
-
-    -- Clear or hide old rows
-    for i = 1, #tauntRows do
-        tauntRows[i]:Hide()
+-- Get class color for a unit
+local function GetClassColor(casterGUID)
+    local _, class = GetPlayerInfoByGUID(casterGUID)
+    if class and CLASS_COLORS[class] then
+        return CLASS_COLORS[class].r, CLASS_COLORS[class].g, CLASS_COLORS[class].b
     end
-
-    local displayIndex = 1
-    for i = #tauntHistory, 1, -1 do -- Iterate backwards to show newest first
-        local entry = tauntHistory[i]
-        if not entry then break end
-
-        local row = tauntRows[displayIndex]
-        if not row then
-            -- Create a new row if needed
-            row = CreateFrame("Button", ADDON_NAME .. "Row" .. displayIndex, scrollChild)
-            row:SetSize(frameWidth, rowHeight)
-
-            row.icon = row:CreateTexture(nil, "ARTWORK")
-            row.icon:SetSize(iconSize, iconSize)
-            row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
-
-            row.text = row:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-            row.text:SetPoint("LEFT", row.icon, "RIGHT", 5, 0)
-            row.text:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-            row.text:SetJustifyH("LEFT")
-            row.text:SetWordWrap(false)
-
-            row:SetScript("OnClick", function(self)
-                local chatMessage = string.format("|T%s:%d|t %s taunted (%s) at %s",
-                    self.spellIcon, 16, self.casterName, self.spellName, date("%H:%M:%S", self.timestamp))
-
-                local channel = "SAY" -- Default
-                if IsInRaid() then
-                    channel = "RAID"
-                elseif IsInGroup() then
-                    channel = "INSTANCE_CHAT" -- Use INSTANCE_CHAT in dungeons/scenarios
-                    if GetNumGroupMembers(LE_PARTY_CATEGORY_INSTANCE) == 0 then -- Check if actually in instance group
-                      channel = "PARTY" -- Fallback to PARTY if not in instance group but still grouped
-                    end
-                end
-                SendChatMessage(chatMessage, channel)
-                print(ADDON_NAME .. ": Announced - " .. chatMessage)
-            end)
-
-            tauntRows[displayIndex] = row
-        end
-
-        -- Populate row data
-        row.timestamp = entry.timestamp
-        row.spellId = entry.spellId
-        row.casterName = entry.casterName
-        row.spellIcon = entry.spellIcon
-        row.spellName = entry.spellName
-
-        -- Set UI elements
-        row.icon:SetTexture(entry.spellIcon or "Interface/Icons/INV_Misc_QuestionMark")
-        row.text:SetText(string.format("%s - %s [%s]", date("%H:%M:%S", entry.timestamp), entry.casterName, entry.spellName))
-
-        -- Position and show row
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, currentY)
-        row:Show()
-
-        currentY = currentY - rowHeight
-        displayIndex = displayIndex + 1
-
-        if displayIndex > (LaZTauntDB.maxEntries or defaults.maxEntries) then
-            break -- Stop processing if we've hit the max display limit
-        end
-    end
-
-    -- Update scroll child height
-    local totalHeight = math.abs(currentY)
-    scrollChild:SetHeight(math.max(totalHeight, scrollFrame:GetHeight())) -- Ensure it's at least as tall as the scroll frame view
+    return 0.5, 0.5, 0.5 -- Fallback gray
 end
 
--- ============================================================================
--- Add Taunt Entry Function
--- ============================================================================
-function LaZTaunt:AddTaunt(timestamp, spellId, casterGUID, casterName)
-    -- Basic filtering (ignore if caster is not a player, unless we specifically want pet taunts later)
-    if not UnitIsPlayer(casterName) then
-        -- You might want to add logic here to check if the casterGUID belongs to a player's pet
-        -- For now, we only track direct player taunts for simplicity
-         -- Check if it's a known pet taunt ID (optional)
-        if not (knownTauntSpellIDs[spellId] and string.find(casterGUID, "Pet")) then
-             return
-        end
-        -- If allowing pets, might want to format name like "PlayerName's Pet"
-        -- local ownerName = -- Need logic to get pet owner if desired
-        -- casterName = ownerName .. "'s Pet"
+-- Initialization function
+local function InitializeLaZTaunt()
+    if isInitialized then return end
+
+    if not table.insert or not table.concat or not table.sort then
+        -- print(ADDON_NAME .. ": Critical error - Lua table functions missing post-init! Please report to Blizzard (11.1 bug).")
+        return
     end
 
-    local spellName, _, spellIcon = GetSpellInfo(spellId)
-    if not spellName then
-        spellName = "Unknown Spell (" .. spellId .. ")"
-        spellIcon = "Interface/Icons/INV_Misc_QuestionMark"
-    end
-
-    local entry = {
-        timestamp = timestamp,
-        spellId = spellId,
-        casterName = casterName,
-        spellIcon = spellIcon,
-        spellName = spellName,
+    -- Known Taunt Spell IDs - Added Follower Dungeon taunts
+    local knownTauntSpellIDs = {
+        [355] = true,   -- Warrior: Taunt
+        [62124] = true, -- Paladin: Hand of Reckoning
+        [56222] = true, -- Death Knight: Dark Command
+        [185245] = true,-- Demon Hunter: Torment
+        [115546] = true,-- Monk: Provoke
+        [5209] = true,  -- Druid: Growl (Bear Form)
+        [2649] = true,  -- Hunter Pet: Growl
+        [119905] = true, -- Warlock Pet: Threatening Presence
+        [420090] = true, -- Follower Dungeon: Captain Garrick's Taunt
+        
     }
 
-    tinsert(tauntHistory, entry)
+    -- Frame Creation with Custom UI (Damage Meter Style)
+    LaZTaunt.frame = CreateFrame("Frame", ADDON_NAME .. "Frame", UIParent, "BackdropTemplate")
+    local mainFrame = LaZTaunt.frame
+    mainFrame:SetSize(LaZTauntDB.frameWidth or defaults.frameWidth, LaZTauntDB.frameHeight or defaults.frameHeight)
+    mainFrame:SetMovable(true)
+    mainFrame:SetClampedToScreen(true)
+    mainFrame:EnableMouse(true)
+    mainFrame:RegisterForDrag("LeftButton")
+    mainFrame:SetScript("OnDragStart", mainFrame.StartMoving)
+    mainFrame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, relativePoint, xOfs, yOfs = self:GetPoint()
+        LaZTauntDB.pos = { point, "UIParent", relativePoint, xOfs, yOfs }
+    end)
 
-    -- Limit history size
-    local maxEntries = LaZTauntDB.maxEntries or defaults.maxEntries
-    if #tauntHistory > maxEntries then
-        tremove(tauntHistory, 1) -- Remove the oldest entry
+    -- Dark background with thin border using BackdropTemplate
+    local backdropInfo = {
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    }
+    mainFrame:SetBackdrop(backdropInfo)
+    mainFrame:SetBackdropColor(0, 0, 0, 0.8)
+    mainFrame:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
+
+    -- Title
+    mainFrame.title = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    mainFrame.title:SetPoint("TOP", mainFrame, "TOP", 0, -5)
+    mainFrame.title:SetText(ADDON_NAME)
+
+    -- Scroll Frame (Custom, no Blizzard template) - Set to 600px wide
+    LaZTaunt.scrollFrame = CreateFrame("ScrollFrame", ADDON_NAME .. "ScrollFrame", mainFrame)
+    LaZTaunt.scrollFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 5, -20)
+    LaZTaunt.scrollFrame:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -20, 5)
+    LaZTaunt.scrollFrame:SetSize(600, 500) -- 600px wide, 500px tall
+    -- print(ADDON_NAME .. ": ScrollFrame size set to: " .. LaZTaunt.scrollFrame:GetWidth() .. "x" .. LaZTaunt.scrollFrame:GetHeight())
+
+    LaZTaunt.scrollChild = CreateFrame("Frame", ADDON_NAME .. "ScrollChild", LaZTaunt.scrollFrame)
+    LaZTaunt.scrollChild:SetWidth(LaZTaunt.scrollFrame:GetWidth())
+    LaZTaunt.scrollChild:SetHeight(1)
+    LaZTaunt.scrollFrame:SetScrollChild(LaZTaunt.scrollChild)
+
+    -- Scrollbar (Custom)
+    LaZTaunt.scrollBar = CreateFrame("Slider", ADDON_NAME .. "ScrollBar", LaZTaunt.scrollFrame, "UIPanelScrollBarTemplate")
+    LaZTaunt.scrollBar:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", -5, -20)
+    LaZTaunt.scrollBar:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -5, 5)
+    LaZTaunt.scrollBar:SetMinMaxValues(0, 0)
+    LaZTaunt.scrollBar:SetValueStep(1)
+    LaZTaunt.scrollBar:SetValue(0)
+    LaZTaunt.scrollBar:SetWidth(16)
+    LaZTaunt.scrollBar:SetScript("OnValueChanged", function(self, value)
+        LaZTaunt.scrollFrame:SetVerticalScroll(value)
+    end)
+
+    -- Functions
+    function LaZTaunt:ApplyPosition()
+        local pos = LaZTauntDB.pos or defaults.pos
+        if pos and type(pos) == "table" and #pos == 5 and _G[pos[2]] then
+            local relativeFrame = _G[pos[2]]
+            if relativeFrame and relativeFrame:IsObjectType("Frame") then
+                self.frame:ClearAllPoints()
+                self.frame:SetPoint(pos[1], relativeFrame, pos[3], pos[4], pos[5])
+            else
+                self.frame:ClearAllPoints()
+                self.frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                LaZTauntDB.pos = defaults.pos
+            end
+        else
+            self.frame:ClearAllPoints()
+            self.frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            LaZTauntDB.pos = defaults.pos
+        end
     end
 
+    function LaZTaunt:UpdateDisplay()
+        local rowHeight = defaults.rowHeight
+        local maxEntries = LaZTauntDB.maxEntries or defaults.maxEntries
+        local rowSpacing = 2 -- 2px gap between rows
+
+        -- print(ADDON_NAME .. ": UpdateDisplay - Total entries in tauntHistory: " .. #tauntHistory)
+        for _, row in ipairs(tauntRows) do
+            row:Hide()
+        end
+
+        local currentY = 0
+        local displayCount = 0
+        for i = #tauntHistory, math.max(1, #tauntHistory - maxEntries + 1), -1 do
+            -- print(ADDON_NAME .. ": Processing entry " .. i .. " of " .. #tauntHistory)
+            local entry = tauntHistory[i]
+            -- print(ADDON_NAME .. ": Entry - Timestamp: " .. entry.timestamp .. ", Caster: " .. entry.casterName .. ", Spell: " .. entry.spellName)
+            local row = tauntRows[displayCount + 1]
+            if not row then
+                -- print(ADDON_NAME .. ": Creating new row " .. (displayCount + 1))
+                row = CreateFrame("Button", ADDON_NAME .. "Row" .. (displayCount + 1), self.scrollChild)
+                row:SetSize(self.scrollFrame:GetWidth() - 10, rowHeight)
+
+                -- Colored bar background (class color) - Enclose icon and text
+                row.bar = row:CreateTexture(nil, "BACKGROUND")
+                row.bar:SetPoint("LEFT", row, "LEFT", 0, 0)
+                row.bar:SetSize(self.scrollFrame:GetWidth() - 10, rowHeight)
+
+                -- Spell icon - Larger to match row height
+                row.icon = row:CreateTexture(nil, "ARTWORK")
+                row.icon:SetSize(32, 32) -- 32x32 to match 43px row height
+                row.icon:SetPoint("LEFT", row, "LEFT", 2, 0) -- Centered vertically
+
+                -- Text (timestamp, caster, spell name) - Two lines, larger font
+                row.textTop = row:CreateFontString(nil, "OVERLAY", "GameFontNormal") -- 18pt
+                row.textTop:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 5, -4) -- Adjusted to center vertically with 2px padding above
+                row.textTop:SetPoint("TOPRIGHT", row, "TOPRIGHT", -2, -4)
+                row.textTop:SetJustifyH("LEFT")
+                row.textTop:SetTextColor(1, 1, 1) -- White
+                row.textTop:SetShadowOffset(1, -1)
+                row.textTop:SetShadowColor(0, 0, 0, 1)
+
+                row.textBottom = row:CreateFontString(nil, "OVERLAY", "GameFontNormal") -- 18pt
+                row.textBottom:SetPoint("TOPLEFT", row.textTop, "BOTTOMLEFT", 0, -3) -- 3px gap between lines to fit 43px height
+                row.textBottom:SetPoint("TOPRIGHT", row.textTop, "BOTTOMRIGHT", 0, -3)
+                row.textBottom:SetJustifyH("LEFT")
+                row.textBottom:SetTextColor(1, 1, 1) -- White
+                row.textBottom:SetShadowOffset(1, -1)
+                row.textBottom:SetShadowColor(0, 0, 0, 1)
+
+                row:SetScript("OnClick", function(self)
+                    local chatMessage = string.format("%s taunted (%s) at %s",
+                        self.casterName, self.spellName, date("%H:%M:%S", self.timestamp))
+                    local channel = "SAY"
+                    if IsInRaid() then channel = "RAID"
+                    elseif IsInGroup() then
+                        channel = "INSTANCE_CHAT"
+                        if GetNumGroupMembers(LE_PARTY_CATEGORY_INSTANCE) == 0 then channel = "PARTY" end
+                    end
+                    SendChatMessage(chatMessage, channel)
+                    print(ADDON_NAME .. ": Announced - " .. chatMessage)
+                end)
+
+                tauntRows[displayCount + 1] = row
+            end
+
+            row.timestamp = entry.timestamp
+            row.spellId = entry.spellId
+            row.casterName = entry.casterName
+            row.spellIcon = entry.spellIcon
+            row.spellName = entry.spellName
+            row.casterGUID = entry.casterGUID
+
+            -- Set class color for the bar
+            local r, g, b = GetClassColor(entry.casterGUID)
+            row.bar:SetColorTexture(r, g, b, 0.5)
+
+            row.icon:SetTexture(entry.spellIcon or "Interface/Icons/INV_Misc_QuestionMark")
+            row.textTop:SetText(string.format("%s - %s", 
+                date("%H:%M:%S", entry.timestamp), 
+                entry.casterName))
+            row.textBottom:SetText(string.format("[%s]", entry.spellName))
+            -- print(ADDON_NAME .. ": Row " .. (displayCount + 1) .. " updated - Top Text: " .. row.textTop:GetText() .. ", Bottom Text: " .. row.textBottom:GetText())
+
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", self.scrollChild, "TOPLEFT", 0, currentY)
+            row:Show()
+            -- print(ADDON_NAME .. ": Row " .. (displayCount + 1) .. " positioned at Y: " .. currentY .. ", Visible: " .. tostring(row:IsVisible()))
+
+            currentY = currentY - (rowHeight + rowSpacing) -- Add 2px gap
+            displayCount = displayCount + 1
+        end
+
+        self.scrollChild:SetHeight(displayCount * (rowHeight + rowSpacing))
+        -- print(ADDON_NAME .. ": ScrollChild height set to: " .. self.scrollChild:GetHeight())
+        -- Update scrollbar range
+        local maxScroll = math.max(0, (displayCount * (rowHeight + rowSpacing)) - self.scrollFrame:GetHeight())
+        self.scrollBar:SetMinMaxValues(0, maxScroll)
+        self.scrollBar:SetValue(math.min(self.scrollBar:GetValue(), maxScroll))
+        -- print(ADDON_NAME .. ": Scrollbar range set - Min: 0, Max: " .. maxScroll)
+    end
+
+    function LaZTaunt:AddTaunt(timestamp, spellId, casterGUID, casterName)
+        -- print(ADDON_NAME .. ": AddTaunt called - SpellID: " .. spellId .. ", Caster: " .. casterName .. ", GUID: " .. casterGUID)
+        if not knownTauntSpellIDs[spellId] then
+            -- print(ADDON_NAME .. ": SpellID " .. spellId .. " not in knownTauntSpellIDs")
+            return
+        end
+
+        local playerGUID = UnitGUID("player")
+        local petGUID = UnitGUID("pet")
+        -- print(ADDON_NAME .. ": PlayerGUID: " .. (playerGUID or "nil") .. ", PetGUID: " .. (petGUID or "nil"))
+
+        if not IsInGroup() and not IsInRaid() then
+            -- print(ADDON_NAME .. ": Solo mode check")
+            if casterGUID ~= playerGUID and casterGUID ~= petGUID then
+                -- print(ADDON_NAME .. ": Failed solo check - CasterGUID does not match player or pet")
+                return
+            end
+        elseif IsInGroup() or IsInRaid() then
+            -- print(ADDON_NAME .. ": Group/Raid mode check")
+            local isGroupMemberOrPet = casterGUID == playerGUID or casterGUID == petGUID
+            if not isGroupMemberOrPet then
+                local numMembers = GetNumGroupMembers()
+                local unitPrefix = IsInRaid() and "raid" or "party"
+                for i = 1, numMembers do
+                    local unit = (i == numMembers and unitPrefix == "party") and "player" or (unitPrefix .. i)
+                    local unitGUID = UnitGUID(unit)
+                    local unitPetGUID = UnitGUID(unit .. "pet")
+                    -- print(ADDON_NAME .. ": Checking " .. unit .. " - UnitGUID: " .. (unitGUID or "nil") .. ", UnitPetGUID: " .. (unitPetGUID or "nil"))
+                    if casterGUID == unitGUID or (unitPetGUID and casterGUID == unitPetGUID) then
+                        isGroupMemberOrPet = true
+                        break
+                    end
+                end
+            end
+            if not isGroupMemberOrPet then
+                -- print(ADDON_NAME .. ": Failed group/raid check - CasterGUID not in group/raid")
+                return
+            end
+        end
+
+        local spellInfo = C_Spell.GetSpellInfo(spellId)
+        local spellName = spellInfo and spellInfo.name or "Unknown Spell (" .. spellId .. ")"
+        local spellIcon = spellInfo and spellInfo.iconID or "Interface/Icons/INV_Misc_QuestionMark"
+        -- print(ADDON_NAME .. ": SpellInfo - Name: " .. spellName .. ", Icon: " .. spellIcon)
+
+        local entry = {
+            timestamp = timestamp,
+            spellId = spellId,
+            casterName = casterName,
+            spellIcon = spellIcon,
+            spellName = spellName,
+            casterGUID = casterGUID, -- Store for class color
+        }
+
+        if #tauntHistory >= (LaZTauntDB.maxEntries or defaults.maxEntries) then
+            table.remove(tauntHistory, 1)
+        end
+        table.insert(tauntHistory, entry)
+        -- print(ADDON_NAME .. ": Added taunt to history - Total entries: " .. #tauntHistory)
+
+        if not self.updatePending then
+            self.updatePending = true
+            C_Timer.After(0.1, function()
+                -- print(ADDON_NAME .. ": Updating display...")
+                LaZTaunt:UpdateDisplay()
+                LaZTaunt.updatePending = false
+            end)
+        end
+    end
+
+    -- Event Frame
+    LaZTaunt.eventFrame = CreateFrame("Frame", ADDON_NAME .. "EventFrame")
+    local eventFrame = LaZTaunt.eventFrame
+    eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+    eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+
+    eventFrame:SetScript("OnEvent", function(self, event, ...)
+        if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+            local timestamp, subEvent, _, sourceGUID, sourceName, _, _, _, _, _, _, spellId = CombatLogGetCurrentEventInfo()
+            -- print(ADDON_NAME .. ": Combat Log Event - SubEvent: " .. (subEvent or "nil") .. ", SpellID: " .. (spellId or "nil") .. ", Source: " .. (sourceName or "nil"))
+            if subEvent == "SPELL_CAST_SUCCESS" then
+                LaZTaunt:AddTaunt(timestamp, spellId, sourceGUID, sourceName)
+            end
+        elseif event == "GROUP_ROSTER_UPDATE" then
+            LaZTaunt:UpdateDisplay()
+        end
+    end)
+
+    -- Initial setup
+    LaZTaunt:ApplyPosition()
     LaZTaunt:UpdateDisplay()
+    isInitialized = true
+    print(ADDON_NAME .. ": Initialized manually for The War Within 11.1!")
 end
 
--- ============================================================================
--- Event Handling
--- ============================================================================
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-eventFrame:RegisterEvent("ADDON_LOADED")
-
-eventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "ADDON_LOADED" then
-        local addonName = ...
-        if addonName == ADDON_NAME then
-            print(ADDON_NAME .. " Loaded!")
-            -- Apply position only after the addon is fully loaded
-            LaZTaunt:ApplyPosition()
-            -- Populate display if there's any saved history (unlikely, but possible if modified)
-            LaZTaunt:UpdateDisplay()
-            -- Unregister ADDON_LOADED after first load if not needed further
-            -- self:UnregisterEvent("ADDON_LOADED")
-        end
-    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        local timestamp, subEvent, _, sourceGUID, sourceName, _, _, destGUID, destName, _, _, spellId = CombatLogGetCurrentEventInfo()
-
-        -- Check for successful spell casts that are in our known taunt list
-        if subEvent == "SPELL_CAST_SUCCESS" and knownTauntSpellIDs[spellId] then
-            -- We have a taunt!
-             -- Filter out self-taunts if desired (unlikely for most taunts but possible)
-             -- if sourceGUID == destGUID then return end
-            LaZTaunt:AddTaunt(timestamp, spellId, sourceGUID, sourceName)
-        end
-        -- Could also listen for SPELL_AURA_APPLIED for taunt debuffs if needed,
-        -- but CAST_SUCCESS is usually sufficient for tracking the action itself.
-    end
-end)
-
--- ============================================================================
--- Slash Commands (Optional: for testing/debugging)
--- ============================================================================
+-- Slash Command to Trigger Initialization
 SLASH_LAZTAUNT1 = "/ltz"
 SlashCmdList["LAZTAUNT"] = function(msg)
+    if not isInitialized then
+        InitializeLaZTaunt()
+    end
     local cmd = strlower(msg or "")
     if cmd == "test" then
-        -- Add a dummy entry for testing layout/click
-        local testSpellId = 355 -- Warrior Taunt
-        LaZTaunt:AddTaunt(GetTime(), testSpellId, UnitGUID("player") or "Player-123-ABC", UnitName("player") or "TestPlayer")
+        LaZTaunt:AddTaunt(GetTime(), 355, UnitGUID("player") or "Player-123-ABC", UnitName("player") or "TestPlayer")
         print(ADDON_NAME .. ": Added test entry.")
     elseif cmd == "clear" then
-        tauntHistory = {}
+        wipe(tauntHistory)
         LaZTaunt:UpdateDisplay()
         print(ADDON_NAME .. ": History cleared.")
     elseif cmd == "resetpos" then
@@ -303,10 +355,11 @@ SlashCmdList["LAZTAUNT"] = function(msg)
         print(ADDON_NAME .. ": Position reset.")
     else
         print(ADDON_NAME .. " Commands:")
+        print("/ltz - Initializes the addon")
         print("/ltz test - Adds a test entry")
         print("/ltz clear - Clears the history")
         print("/ltz resetpos - Resets frame position")
     end
 end
 
-print(ADDON_NAME .. ": Initializing...")
+print(ADDON_NAME .. ": Waiting for /ltz to initialize (The War Within 11.1)...")
